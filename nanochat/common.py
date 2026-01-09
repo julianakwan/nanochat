@@ -127,10 +127,36 @@ def is_ddp_initialized() -> bool:
     """
     return dist.is_available() and dist.is_initialized()
 
+def setup_ddp_info(cluster_addr="hsn.cm.aurora.alcf.anl.gov"):
+    from mpi4py import MPI
+    import socket
+    
+    ddp_world_size = MPI.COMM_WORLD.Get_size()
+    ddp_rank = MPI.COMM_WORLD.Get_rank()
+    ddp_local_rank = os.environ.get('PALS_LOCAL_RANKID')
+
+    os.environ['RANK'] = str(ddp_rank)
+    os.environ['LOCAL_RANK'] = str(ddp_local_rank)
+    os.environ['WORLD_SIZE'] = str(ddp_world_size)
+
+    node_address = socket.gethostname() if ddp_rank == 0 else None
+    node_address = MPI.COMM_WORLD.bcast(node_address, root=0)
+    os.environ['MASTER_ADDR'] = f"{node_address}.{cluster_addr}"
+    os.environ['MASTER_PORT'] = str(2345)
+
+    return
+
 def get_dist_info():
+    setup_ddp_info()
+    
     if is_ddp_requested():
         # We rely on torchrun's env to decide if we SHOULD init.
         # (Initialization itself happens in compute init.)
+
+        # This sets the environment variables that torchrun would normally
+        # take care of
+
+        
         assert all(var in os.environ for var in ['RANK', 'LOCAL_RANK', 'WORLD_SIZE'])
         ddp_rank = int(os.environ['RANK'])
         ddp_local_rank = int(os.environ['LOCAL_RANK'])
@@ -145,6 +171,8 @@ def autodetect_device_type():
         device_type = "cuda"
     elif torch.backends.mps.is_available():
         device_type = "mps"
+    elif torch.xpu.is_available():
+        device_type = "xpu"
     else:
         device_type = "cpu"
     print0(f"Autodetected device type: {device_type}")
@@ -153,18 +181,25 @@ def autodetect_device_type():
 def compute_init(device_type="cuda"): # cuda|cpu|mps
     """Basic initialization that we keep doing over and over, so make common."""
 
-    assert device_type in ["cuda", "mps", "cpu"], "Invalid device type atm"
+    assert device_type in ["cuda", "mps", "cpu", "xpu"], "Invalid device type atm"
     if device_type == "cuda":
         assert torch.cuda.is_available(), "Your PyTorch installation is not configured for CUDA but device_type is 'cuda'"
     if device_type == "mps":
         assert torch.backends.mps.is_available(), "Your PyTorch installation is not configured for MPS but device_type is 'mps'"
+    if device_type == "xpu":
+        assert torch.xpu.is_available(), "Your PyTorch installation is not configured for Intel GPUs but device_type is 'xpu'"
 
+        
     # Reproducibility
     # Note that we set the global seeds here, but most of the code uses explicit rng objects.
     # The only place where global rng might be used is nn.Module initialization of the model weights.
     torch.manual_seed(42)
     if device_type == "cuda":
         torch.cuda.manual_seed(42)
+
+    if device_type == "xpu":
+        torch.xpu.manual_seed(42)
+        
     # skipping full reproducibility for now, possibly investigate slowdown later
     # torch.use_deterministic_algorithms(True)
 
@@ -172,13 +207,22 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
     if device_type == "cuda":
         torch.backends.cuda.matmul.fp32_precision = "tf32" # uses tf32 instead of fp32 for matmuls
 
-    # Distributed setup: Distributed Data Parallel (DDP), optional, and requires CUDA
+    #I think this mimicks the above, in that matrix multiplications will either use the TensorFloat32
+    #datatype or two bfloat16s as necessary. 
+    if device_type == "xpu":
+        torch.set_float32_matmul_precision("high") 
+
+    # Distributed setup: Distributed Data Parallel (DDP), optional
     is_ddp_requested, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
     if is_ddp_requested and device_type == "cuda":
         device = torch.device("cuda", ddp_local_rank)
         torch.cuda.set_device(device)  # make "cuda" default to this device
         dist.init_process_group(backend="nccl", device_id=device)
         dist.barrier()
+    elif is_ddp_requested and device_type == "xpu":
+        device = torch.device(f"xpu:{ddp_local_rank}")
+        torch.xpu.set_device(device)
+        dist.init_process_group(backend="xccl", device_id=device, init_method='env://', rank = ddp_rank, world_size=ddp_world_size)
     else:
         device = torch.device(device_type) # mps|cpu
 

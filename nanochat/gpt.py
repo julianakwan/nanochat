@@ -192,7 +192,7 @@ class GPT(nn.Module):
         self.cos, self.sin = cos, sin
 
         # Cast token embeddings to bf16: optimizer can tolerate it and it saves memory
-        if self.transformer.wte.weight.device.type == "cuda":
+        if self.transformer.wte.weight.device.type == "cuda" or "xpu":
             self.transformer.wte.to(dtype=torch.bfloat16)
 
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):

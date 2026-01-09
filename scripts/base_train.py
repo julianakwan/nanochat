@@ -36,7 +36,7 @@ parser = argparse.ArgumentParser(description="Pretrain base model")
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 # Runtime
-parser.add_argument("--device_type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+parser.add_argument("--device_type", type=str, default="", help="cuda|cpu|mps|xpu (empty = autodetect)")
 # Model architecture
 parser.add_argument("--depth", type=int, default=20, help="depth of the Transformer model")
 parser.add_argument("--aspect_ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
@@ -76,9 +76,20 @@ user_config = vars(args).copy()  # for logging
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
-autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
-synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
-get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
+
+
+autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if "cuda" or "xpu" in device_type else nullcontext()
+if device_type == "cuda":
+    synchronize = torch.cuda.synchronize
+    get_max_memory = torch.cuda.max_memory_allocated    
+elif device_type == "xpu":
+    synchronize = torch.xpu.synchronize
+    get_max_memory = torch.xpu.max_memory_allocated        
+else:
+    synchronize = lambda: None
+    get_max_memory = lambda: None
+    
+
 
 # wandb logging init
 use_dummy_wandb = args.run == "dummy" or not master_process
